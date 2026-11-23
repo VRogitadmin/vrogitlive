@@ -1,0 +1,301 @@
+<?php
+
+namespace App\Domain\Platform;
+
+use App\Domain\Core\Identity\Models\User;
+
+/**
+ * Section rollout (Admin › Testing › Section rollout, super admins only):
+ * while it is switched on, every user except super admins sees only the
+ * menu items a super admin has opened, in all three portals, so a client
+ * can test one section at a time (decided 2026-09-28: global for all
+ * non-super-admin users, per menu item, confirmations tracked outside the
+ * app).
+ *
+ * A closed item disappears from the menu and its pages are refused
+ * (EnforceSectionRollout). Each item owns the URL paths under it; a path
+ * belongs to the item with the longest matching path, so "Statement
+ * History" (/branch/statements/imports) can be open while "Manual
+ * Entry" (/branch/statements) is closed. Dashboards and Profile & settings
+ * are always open. The first path of each item is its menu link.
+ *
+ * A gated item (Developer › Partner API Docs) stays closed to everyone but
+ * super admins until it is opened here, even while rollout is off.
+ *
+ * Keep SECTIONS in step with resources/js/lib/portal-nav.ts when a menu
+ * item is added.
+ */
+class SectionRollout
+{
+    /** Setting value: {active: bool, open: {admin: [keys], branch: [keys], partner: [keys]}} */
+    public const SETTING = 'rollout.sections';
+
+    /**
+     * @var array<string, array<string, array<string, array{label: string, paths: list<string>, gated?: bool}>>>
+     */
+    public const SECTIONS = [
+        'admin' => [
+            'Bank & UPI Accounts' => [
+                'accounts' => ['label' => 'Bank & UPI Accounts', 'paths' => ['/admin/accounts']],
+            ],
+            // Payments › Deposit and › Withdrawal are pages of tabs (PaymentHub);
+            // each tab stays its own item here, so it opens on its own.
+            'Payments › Deposit' => [
+                'transactions' => ['label' => 'All deposits (Transactions)', 'paths' => ['/admin/transactions', '/admin/webhooks']],
+                'deposits' => ['label' => 'Manual Deposit', 'paths' => ['/admin/deposits']],
+                'statements' => ['label' => 'Manual Entry', 'paths' => ['/admin/statements']],
+                'unsettled' => ['label' => 'Unsettled UTR', 'paths' => ['/admin/unsettled']],
+                'utr' => ['label' => 'UTR Reconciliation (Deposit and Withdrawal)', 'paths' => ['/admin/utr-reconciliation']],
+            ],
+            'Payments › Withdrawal' => [
+                // Longer than /admin/transactions, so it is this item's (added 2026-11-09).
+                'payout_transactions' => ['label' => 'All withdrawals (Transactions › Payouts)', 'paths' => ['/admin/transactions/payouts']],
+                'payouts' => ['label' => 'Manual Payout', 'paths' => ['/admin/payouts']],
+            ],
+            'Payments' => [
+                'chargebacks' => ['label' => 'Chargebacks', 'paths' => ['/admin/chargebacks']],
+                'payout_returns' => ['label' => 'Payout returns', 'paths' => ['/admin/payout-returns']],
+            ],
+            'Network' => [
+                'partners' => ['label' => 'Partners', 'paths' => ['/admin/partners']],
+                'branches' => ['label' => 'Branches', 'paths' => ['/admin/branches']],
+                'partner_branches' => ['label' => 'Partner → branches', 'paths' => ['/admin/mappings/by-partner']],
+                'branch_partners' => ['label' => 'Branch → partners', 'paths' => ['/admin/mappings/by-branch']],
+                'mappings' => ['label' => 'Branch mapping', 'paths' => ['/admin/mappings']],
+            ],
+            'Finance' => [
+                'settlements' => ['label' => 'Settlement', 'paths' => ['/admin/settlements']],
+                // /admin/settlement-dashboard alone shows the Admin side.
+                'settlement_dashboard_admin' => ['label' => 'Admin Settlement Dashboard', 'paths' => ['/admin/settlement-dashboard/admin', '/admin/settlement-dashboard']],
+                'settlement_dashboard_branch' => ['label' => 'Branch Settlement Dashboard', 'paths' => ['/admin/settlement-dashboard/branch']],
+                'settlement_dashboard_partner' => ['label' => 'Partner Settlement Dashboard', 'paths' => ['/admin/settlement-dashboard/partner']],
+                'commissions' => ['label' => 'Commissions', 'paths' => ['/admin/commissions']],
+                'reports' => ['label' => 'Reports', 'paths' => ['/admin/reports']],
+            ],
+            'System' => [
+                'users' => ['label' => 'Users', 'paths' => ['/admin/users']],
+                'roles' => ['label' => 'Roles & Permissions', 'paths' => ['/admin/roles']],
+                'settings' => ['label' => 'Global Settings', 'paths' => ['/admin/settings']],
+                'ip' => ['label' => 'IP Management', 'paths' => ['/admin/ip-management']],
+                'audit' => ['label' => 'Audit Logs', 'paths' => ['/admin/audit-logs']],
+            ],
+            'Developer' => [
+                'partner_api_docs' => ['label' => 'Partner API Docs', 'paths' => ['/admin/partner-api-docs'], 'gated' => true],
+            ],
+        ],
+        'branch' => [
+            'Bank & UPI Accounts' => [
+                'accounts' => ['label' => 'Bank & UPI Accounts', 'paths' => ['/branch/accounts']],
+            ],
+            'Payments › Deposit' => [
+                'payins' => ['label' => 'All deposits (Pay-in History)', 'paths' => ['/branch/payins']],
+                'deposits' => ['label' => 'Manual Deposit', 'paths' => ['/branch/deposits']],
+                'statements' => ['label' => 'Manual Entry', 'paths' => ['/branch/statements']],
+                'unsettled' => ['label' => 'Unsettled UTR', 'paths' => ['/branch/unsettled']],
+                'utr' => ['label' => 'UTR Reconciliation (Deposit and Withdrawal)', 'paths' => ['/branch/utr-reconciliation']],
+            ],
+            'Payments › Withdrawal' => [
+                'payout_history' => ['label' => 'All withdrawals (Pay-out History)', 'paths' => ['/branch/payout-history']],
+                'payouts' => ['label' => 'Manual Payout', 'paths' => ['/branch/payouts']],
+            ],
+            'Payments' => [
+                'chargebacks' => ['label' => 'Chargebacks', 'paths' => ['/branch/chargebacks']],
+                'payout_returns' => ['label' => 'Payout returns', 'paths' => ['/branch/payout-returns']],
+            ],
+            'Account' => [
+                'imports' => ['label' => 'Statement History', 'paths' => ['/branch/statements/imports']],
+            ],
+            'Finance' => [
+                'settlement_dashboard' => ['label' => 'Branch Settlement Dashboard', 'paths' => ['/branch/settlement-dashboard']],
+            ],
+            'System' => [
+                'users' => ['label' => 'Users', 'paths' => ['/branch/users']],
+                'audit' => ['label' => 'Audit Logs', 'paths' => ['/branch/audit-logs']],
+            ],
+        ],
+        'partner' => [
+            'Bank & UPI Accounts' => [
+                'accounts' => ['label' => 'Bank & UPI Accounts', 'paths' => ['/partner/accounts']],
+            ],
+            'Payments' => [
+                'payins' => ['label' => 'Deposit', 'paths' => ['/partner/payins', '/partner/webhooks']],
+                'payouts' => ['label' => 'Withdrawal', 'paths' => ['/partner/payouts']],
+                'chargebacks' => ['label' => 'Chargebacks', 'paths' => ['/partner/chargebacks']],
+                'payout_returns' => ['label' => 'Payout returns', 'paths' => ['/partner/payout-returns']],
+            ],
+            'Finance' => [
+                'settlement_dashboard' => ['label' => 'Partner Settlement Dashboard', 'paths' => ['/partner/settlement-dashboard']],
+            ],
+            'Developers' => [
+                'developers' => ['label' => 'API & Webhooks', 'paths' => ['/partner/developers']],
+                'api_docs' => ['label' => 'API documentation', 'paths' => ['/partner/api-docs']],
+                'api_logs' => ['label' => 'API Logs', 'paths' => ['/partner/api-logs']],
+            ],
+            'System' => [
+                'users' => ['label' => 'Users', 'paths' => ['/partner/users']],
+            ],
+            'Account' => [
+                'profile' => ['label' => 'Business profile', 'paths' => ['/partner/profile']],
+            ],
+        ],
+    ];
+
+    /**
+     * Pages taken out of the branch and partner portals (client request
+     * 2026-11-14: Finance shows only the settlement dashboard, no Reports).
+     * Closed to everyone, whatever rollout says; the code stays so a page
+     * can come back by removing it here and listing it in SECTIONS and
+     * portal-nav.ts.
+     *
+     * @var array<string, list<string>>
+     */
+    public const RETIRED = [
+        'branch' => ['/branch/balance', '/branch/settlements', '/branch/reports'],
+        'partner' => ['/partner/balance', '/partner/settlements', '/partner/reports'],
+    ];
+
+    /**
+     * Items split off an existing one: open wherever the old item was open,
+     * until a super admin saves the rollout again (the saved value then has
+     * `version` 2 and lists them itself).
+     */
+    private const SPLIT_FROM = [
+        'admin' => ['payout_transactions' => 'transactions'],
+    ];
+
+    public function __construct(private Settings $settings) {}
+
+    /**
+     * @return array{active: bool, open: array<string, list<string>>}
+     */
+    public function state(): array
+    {
+        $value = (array) ($this->settings->get(self::SETTING) ?? []);
+        $open = [];
+
+        foreach (array_keys(self::SECTIONS) as $portal) {
+            $saved = (array) ($value['open'][$portal] ?? []);
+
+            if (($value['version'] ?? 1) < 2) {
+                foreach (self::SPLIT_FROM[$portal] ?? [] as $key => $from) {
+                    if (in_array($from, $saved, true)) {
+                        $saved[] = $key;
+                    }
+                }
+            }
+
+            $open[$portal] = array_values(array_intersect(array_keys($this->items($portal)), $saved));
+        }
+
+        return ['active' => (bool) ($value['active'] ?? false), 'open' => $open];
+    }
+
+    /**
+     * @param  array<string, list<string>>  $open
+     */
+    public function save(bool $active, array $open, User $actor): void
+    {
+        $clean = [];
+
+        foreach (array_keys(self::SECTIONS) as $portal) {
+            $clean[$portal] = array_values(array_intersect(array_keys($this->items($portal)), $open[$portal] ?? []));
+        }
+
+        $this->settings->set(self::SETTING, ['active' => $active, 'open' => $clean, 'version' => 2], $actor);
+    }
+
+    /**
+     * Whether rollout limits this person at all.
+     */
+    public function limits(?User $user): bool
+    {
+        return $user !== null && ! $user->isSuperAdmin() && $this->state()['active'];
+    }
+
+    /**
+     * The menu links (first path) of the items closed for this person.
+     *
+     * @return list<string>
+     */
+    public function hiddenLinks(?User $user): array
+    {
+        if ($user === null || $user->isSuperAdmin()) {
+            return [];
+        }
+
+        $portal = $user->type->value;
+        $state = $this->state();
+        $hidden = [];
+
+        foreach ($this->items($portal) as $key => $item) {
+            if ($this->closed($state, $portal, $key, $item)) {
+                $hidden[] = $item['paths'][0];
+            }
+        }
+
+        return $hidden;
+    }
+
+    /**
+     * Whether this person may open this path (e.g. "/branch/statements/imports").
+     */
+    public function allows(?User $user, string $path): bool
+    {
+        if ($user === null || $user->isSuperAdmin()) {
+            return true;
+        }
+
+        $portal = $user->type->value;
+        $path = '/'.ltrim($path, '/');
+
+        foreach (self::RETIRED[$portal] ?? [] as $prefix) {
+            if ($path === $prefix || str_starts_with($path, $prefix.'/')) {
+                return false;
+            }
+        }
+
+        $longest = 0;
+        $owners = [];
+
+        foreach ($this->items($portal) as $key => $item) {
+            foreach ($item['paths'] as $prefix) {
+                if ($path !== $prefix && ! str_starts_with($path, $prefix.'/')) {
+                    continue;
+                }
+
+                if (strlen($prefix) > $longest) {
+                    [$longest, $owners] = [strlen($prefix), [$key]];
+                } elseif (strlen($prefix) === $longest) {
+                    $owners[] = $key;
+                }
+            }
+        }
+
+        // Not part of any section (dashboard, settings, files…): always open.
+        $items = $this->items($portal);
+        $state = $this->state();
+
+        return $owners === [] || collect($owners)->contains(fn (string $key) => ! $this->closed($state, $portal, $key, $items[$key]));
+    }
+
+    /**
+     * Closed while rollout is on and it isn't open; a gated item is closed
+     * until it is opened, whether rollout is on or off.
+     *
+     * @param  array{active: bool, open: array<string, list<string>>}  $state
+     * @param  array{label: string, paths: list<string>, gated?: bool}  $item
+     */
+    private function closed(array $state, string $portal, string $key, array $item): bool
+    {
+        return ! in_array($key, $state['open'][$portal] ?? [], true)
+            && ($state['active'] || ($item['gated'] ?? false));
+    }
+
+    /**
+     * @return array<string, array{label: string, paths: list<string>, gated?: bool}>
+     */
+    private function items(string $portal): array
+    {
+        return array_merge(...array_values(self::SECTIONS[$portal] ?? [[]]));
+    }
+}

@@ -1,0 +1,496 @@
+import type { InertiaLinkProps } from '@inertiajs/react';
+import {
+    BookOpen,
+    Code,
+    FileText,
+    GitCompareArrows,
+    Landmark,
+    LayoutDashboard,
+    Network,
+    Settings,
+    User,
+    Wallet,
+} from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
+import admin from '@/routes/admin';
+import adminAccounts from '@/routes/admin/accounts';
+import adminBranches from '@/routes/admin/branches';
+import adminMappings from '@/routes/admin/mappings';
+import adminPartners from '@/routes/admin/partners';
+import adminRoles from '@/routes/admin/roles';
+import adminSettlements from '@/routes/admin/settlements';
+import adminUsers from '@/routes/admin/users';
+import branch from '@/routes/branch';
+import branchAccounts from '@/routes/branch/accounts';
+import branchImports from '@/routes/branch/statement-imports';
+import branchUsers from '@/routes/branch/users';
+import partner, {
+    apiDocs as partnerApiDocs,
+    apiLogs as partnerApiLogs,
+    profile as partnerProfile,
+} from '@/routes/partner';
+import partnerAccounts from '@/routes/partner/accounts';
+import partnerDevelopers from '@/routes/partner/developers';
+import partnerPayoutReturns from '@/routes/partner/payout-returns';
+import partnerUsers from '@/routes/partner/users';
+import { edit as profile } from '@/routes/profile';
+import type { HubKind } from '@/lib/payment-hub';
+import type { UserType } from '@/types';
+
+/**
+ * Sidebar menus per portal, following the design's navigation
+ * (Document/PayGate UI redesign). Items without `href` are planned for the
+ * phase in `soon` and render disabled, so the menu is complete from day one.
+ * Items with `permission` are hidden from users whose role lacks it (the
+ * server checks again on every request).
+ *
+ * The three portals use the same names in the same order (client request
+ * 2026-11-14): Dashboard · Bank & UPI Accounts · Payments (Deposit,
+ * Withdrawal, Chargebacks, Payout returns; admin also Refunds) · Finance
+ * (“<Party> Settlement Dashboard”) · … Branch and partner have no Reports,
+ * Balance or Settlement list (SectionRollout::RETIRED closes those pages).
+ */
+export type NavLink = {
+    label: string;
+    href?: NonNullable<InertiaLinkProps['href']>;
+    /** Planned phase, or 'later' while it waits for a client decision. */
+    soon?: number | 'later';
+    permission?: string;
+    /**
+     * Payments › Deposit / Withdrawal: a page of tabs (lib/payment-hub).
+     * Shown while any tab is open to the person, linking to the first.
+     */
+    hub?: HubKind;
+};
+
+/**
+ * A group with one item shows as a single link (e.g. Dashboard); larger
+ * groups fold open under their heading. `id` tells apart groups that share
+ * a label (the statements group and Profile & settings are both "Account").
+ */
+export type NavGroup = {
+    id?: string;
+    label: string;
+    icon: LucideIcon;
+    items: NavLink[];
+};
+
+export const navGroupId = (group: NavGroup): string => group.id ?? group.label;
+
+export const PORTAL_LABELS: Record<UserType, string> = {
+    admin: 'Admin',
+    branch: 'Branch',
+    partner: 'Partner',
+};
+
+const account: NavGroup = {
+    label: 'Account',
+    icon: User,
+    items: [{ label: 'Profile & settings', href: profile() }],
+};
+
+export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
+    admin: [
+        {
+            label: 'Overview',
+            icon: LayoutDashboard,
+            items: [{ label: 'Dashboard', href: admin.dashboard() }],
+        },
+        {
+            id: 'accounts',
+            label: 'Bank & UPI Accounts',
+            icon: Network,
+            items: [
+                {
+                    label: 'Bank & UPI Accounts',
+                    href: adminAccounts.index(),
+                    permission: 'accounts.view',
+                },
+            ],
+        },
+        {
+            label: 'Network',
+            icon: Network,
+            items: [
+                {
+                    label: 'Partners',
+                    href: adminPartners.index(),
+                    permission: 'partners.view',
+                },
+                {
+                    label: 'Branches',
+                    href: adminBranches.index(),
+                    permission: 'branches.view',
+                },
+                {
+                    label: 'Partner → branches',
+                    href: adminMappings.byPartner(),
+                    permission: 'mappings.view',
+                },
+                {
+                    label: 'Branch → partners',
+                    href: adminMappings.byBranch(),
+                    permission: 'mappings.view',
+                },
+                {
+                    label: 'Branch mapping',
+                    href: adminMappings.index(),
+                    permission: 'mappings.view',
+                },
+            ],
+        },
+        {
+            label: 'Payments',
+            icon: Wallet,
+            items: [
+                // All deposits (Transactions, opens first), Manual Deposit,
+                // Manual Entry, Unsettled UTR and UTR Reconciliation,
+                // as tabs of one page.
+                { label: 'Deposit', hub: 'deposit' },
+                // All withdrawals (opens first), Manual Payout, UTR Reconciliation.
+                { label: 'Withdrawal', hub: 'withdrawal' },
+                {
+                    label: 'Chargebacks',
+                    href: admin.chargebacks.index(),
+                    permission: 'reversals.view',
+                },
+                {
+                    label: 'Payout returns',
+                    href: admin.payoutReturns.index(),
+                    permission: 'reversals.view',
+                },
+            ],
+        },
+        {
+            id: 'reconciliation',
+            label: 'Account',
+            icon: GitCompareArrows,
+            items: [
+                // Manual Entry, UTR Reconciliation and Unsettled UTR
+                // are tabs of Payments › Deposit.
+                // Source not decided yet (bank API, email, SMS…; G-27).
+                { label: 'Auto A/C Statement', soon: 'later' },
+            ],
+        },
+        {
+            label: 'Finance',
+            icon: Landmark,
+            items: [
+                {
+                    label: 'Settlement',
+                    href: adminSettlements.index(),
+                    permission: 'settlements.view',
+                },
+                {
+                    label: 'Admin Settlement Dashboard',
+                    href: admin.settlementDashboard('admin'),
+                    permission: 'settlements.view',
+                },
+                {
+                    label: 'Branch Settlement Dashboard',
+                    href: admin.settlementDashboard('branch'),
+                    permission: 'settlements.view',
+                },
+                {
+                    label: 'Partner Settlement Dashboard',
+                    href: admin.settlementDashboard('partner'),
+                    permission: 'settlements.view',
+                },
+                {
+                    label: 'Commissions',
+                    href: admin.commissions.index(),
+                    permission: 'commissions.view',
+                },
+            ],
+        },
+        {
+            label: 'Reports',
+            icon: FileText,
+            items: [
+                {
+                    label: 'Branch Deposit Report',
+                    href: admin.reports.show({ report: 'branch_deposits' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Partner Deposit Report',
+                    href: admin.reports.show({ report: 'partner_deposits' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Branch Withdrawal Report',
+                    href: admin.reports.show({ report: 'branch_withdrawals' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Partner Withdrawal Report',
+                    href: admin.reports.show({ report: 'partner_withdrawals' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Pay-ins Report',
+                    href: admin.reports.show({ report: 'payins' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Payouts Report',
+                    href: admin.reports.show({ report: 'payouts' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Partner-wise Report',
+                    href: admin.reports.show({ report: 'partners' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Branch-wise Report',
+                    href: admin.reports.show({ report: 'branches' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Partner ↔ Branch Report',
+                    href: admin.reports.show({ report: 'pairs' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Commission Report',
+                    href: admin.reports.show({ report: 'commission' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Balances Report',
+                    href: admin.reports.show({ report: 'balances' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Settlements Report',
+                    href: admin.reports.show({ report: 'settlements' }),
+                    permission: 'reports.view',
+                },
+            ],
+        },
+        {
+            label: 'System',
+            icon: Settings,
+            items: [
+                {
+                    label: 'Users',
+                    href: adminUsers.index(),
+                    permission: 'users.view',
+                },
+                {
+                    label: 'Roles & Permissions',
+                    href: adminRoles.index(),
+                    permission: 'roles.view',
+                },
+                {
+                    label: 'Global Settings',
+                    href: admin.settings.index(),
+                    permission: 'settings.view',
+                },
+                {
+                    label: 'IP Management',
+                    href: admin.ipManagement.index(),
+                    permission: 'ip_rules.view',
+                },
+                {
+                    label: 'Audit Logs',
+                    href: admin.auditLogs.index(),
+                    permission: 'audit_logs.view',
+                },
+            ],
+        },
+        {
+            // Hidden from admins until a super admin opens it in Section
+            // rollout (super admins also get the UI kit here).
+            label: 'Developer',
+            icon: Code,
+            items: [
+                {
+                    label: 'Partner API Docs',
+                    href: admin.partnerApiDocs.show(),
+                    permission: 'partners.view',
+                },
+            ],
+        },
+        {
+            // Admin only (2026-11-16): the whole system in simple English,
+            // to answer branches' and partners' questions.
+            label: 'Guide',
+            icon: BookOpen,
+            items: [{ label: 'Guide', href: admin.guide() }],
+        },
+        account,
+    ],
+    branch: [
+        {
+            label: 'Overview',
+            icon: LayoutDashboard,
+            items: [{ label: 'Dashboard', href: branch.dashboard() }],
+        },
+        {
+            id: 'accounts',
+            label: 'Bank & UPI Accounts',
+            icon: Network,
+            items: [
+                {
+                    label: 'Bank & UPI Accounts',
+                    href: branchAccounts.index(),
+                    permission: 'accounts.view',
+                },
+            ],
+        },
+        {
+            label: 'Payments',
+            icon: Wallet,
+            items: [
+                // All deposits (Pay-in History, opens first), Manual Deposit,
+                // Manual Entry, Unsettled UTR and UTR Reconciliation,
+                // as tabs of one page.
+                { label: 'Deposit', hub: 'deposit' },
+                // All withdrawals (Pay-out History, opens first), Manual
+                // Payout, UTR Reconciliation.
+                { label: 'Withdrawal', hub: 'withdrawal' },
+                {
+                    label: 'Chargebacks',
+                    href: branch.chargebacks.index(),
+                    permission: 'reversals.view',
+                },
+                {
+                    label: 'Payout returns',
+                    href: branch.payoutReturns.index(),
+                    permission: 'payouts.view',
+                },
+            ],
+        },
+        {
+            id: 'reconciliation',
+            label: 'Account',
+            icon: GitCompareArrows,
+            items: [
+                { label: 'Auto A/C Statement', soon: 'later' },
+                {
+                    label: 'Statement History',
+                    href: branchImports.index(),
+                    permission: 'statements.view',
+                },
+            ],
+        },
+        {
+            label: 'Finance',
+            icon: Landmark,
+            items: [
+                {
+                    label: 'Branch Settlement Dashboard',
+                    href: branch.settlementDashboard(),
+                    permission: 'settlements.view',
+                },
+            ],
+        },
+        {
+            label: 'System',
+            icon: Settings,
+            items: [
+                {
+                    label: 'Users',
+                    href: branchUsers.index(),
+                    permission: 'users.view',
+                },
+                {
+                    label: 'Audit Logs',
+                    href: branch.auditLogs.index(),
+                    permission: 'audit_logs.view',
+                },
+            ],
+        },
+        account,
+    ],
+    partner: [
+        {
+            label: 'Overview',
+            icon: LayoutDashboard,
+            items: [{ label: 'Dashboard', href: partner.dashboard() }],
+        },
+        {
+            id: 'accounts',
+            label: 'Bank & UPI Accounts',
+            icon: Network,
+            items: [
+                {
+                    label: 'Bank & UPI Accounts',
+                    href: partnerAccounts.index(),
+                    permission: 'accounts.view',
+                },
+            ],
+        },
+        {
+            label: 'Payments',
+            icon: Wallet,
+            items: [
+                { label: 'Deposit', hub: 'deposit' },
+                { label: 'Withdrawal', hub: 'withdrawal' },
+                {
+                    label: 'Chargebacks',
+                    href: partner.chargebacks.index(),
+                    permission: 'payins.view',
+                },
+                {
+                    label: 'Payout returns',
+                    href: partnerPayoutReturns.index(),
+                    permission: 'payouts.view',
+                },
+            ],
+        },
+        {
+            label: 'Finance',
+            icon: Landmark,
+            items: [
+                {
+                    label: 'Partner Settlement Dashboard',
+                    href: partner.settlementDashboard(),
+                    permission: 'settlements.view',
+                },
+            ],
+        },
+        {
+            label: 'Developers',
+            icon: Code,
+            items: [
+                {
+                    label: 'API & Webhooks',
+                    href: partnerDevelopers.show(),
+                    permission: 'api_keys.view',
+                },
+                {
+                    label: 'API documentation',
+                    href: partnerApiDocs(),
+                    permission: 'api_keys.view',
+                },
+                {
+                    label: 'API Logs',
+                    href: partnerApiLogs(),
+                    permission: 'api_logs.view',
+                },
+            ],
+        },
+        {
+            label: 'System',
+            icon: Settings,
+            items: [
+                {
+                    label: 'Users',
+                    href: partnerUsers.index(),
+                    permission: 'users.view',
+                },
+            ],
+        },
+        {
+            label: 'Account',
+            icon: User,
+            items: [
+                { label: 'Business profile', href: partnerProfile() },
+                ...account.items,
+            ],
+        },
+    ],
+};

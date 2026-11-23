@@ -1,0 +1,415 @@
+import { Head, Link, router } from '@inertiajs/react';
+import { ArrowLeft, Download, Search, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { DataTable, Panel } from '@/components/pg/data-table';
+import type { Column } from '@/components/pg/data-table';
+import { EmptyState } from '@/components/pg/empty-state';
+import { SelectInput } from '@/components/pg/field';
+import { MultiSelect } from '@/components/pg/multi-select';
+import { PageHeader } from '@/components/pg/page-header';
+import { PeriodFilter, periodQuery } from '@/components/pg/period-filter';
+import type { PeriodQuery, PeriodValue } from '@/components/pg/period-filter';
+import { StatusBadge } from '@/components/pg/status-badge';
+import { formatDateTime } from '@/lib/dates';
+import adminAccounts from '@/routes/admin/accounts';
+import branchAccounts from '@/routes/branch/accounts';
+import partnerAccounts from '@/routes/partner/accounts';
+import type { UserType } from '@/types';
+
+type Row = {
+    id: string;
+    at: string;
+    event: string;
+    event_label: string;
+    from: string | null;
+    to: string | null;
+    fields: string[];
+    changes: { field: string; before: string | null; now: string }[];
+    reason: string | null;
+    ip: string | null;
+    account: {
+        id: string;
+        label: string;
+        holder: string | null;
+        bank_name: string | null;
+        account_number: string | null;
+        upi_id: string | null;
+        upi_name: string | null;
+    } | null;
+    branch: { code: string; name: string } | null;
+    who: {
+        name: string;
+        username: string | null;
+        role: string | null;
+        portal: string | null;
+    } | null;
+};
+
+type Filters = {
+    event: string | null;
+    branches: string[];
+    account: string | null;
+    search: string;
+};
+
+type Props = {
+    portal: UserType;
+    logs: {
+        data: Row[];
+        total: number;
+        prev_page_url: string | null;
+        next_page_url: string | null;
+    };
+    filters: Filters;
+    period: PeriodValue;
+    account: { id: string; label: string } | null;
+    events: { value: string; label: string }[];
+    branches: { id: string; code: string; name: string }[];
+};
+
+const EVENT_STATUS: Record<string, string> = {
+    created: 'verification_pending',
+    updated: 'pending_review',
+    verified: 'verified',
+    rejected: 'rejected',
+    activated: 'active',
+    deactivated: 'inactive',
+    paused: 'paused',
+    disabled: 'disabled',
+    verification_changed: 'pending',
+    revealed: 'pending_review',
+};
+
+const branchColumn: Column<Row> = {
+    key: 'branch',
+    header: 'Branch',
+    cell: (row) =>
+        row.branch ? (
+            <div className="whitespace-nowrap">
+                <div>{row.branch.name}</div>
+            </div>
+        ) : (
+            '—'
+        ),
+};
+
+const PORTAL_LABEL: Record<string, string> = {
+    admin: 'PayGate',
+    partner: 'Partner',
+    branch: 'Branch',
+};
+
+function ChangeValues({
+    changes,
+    side,
+}: {
+    changes: { field: string; before: string | null; now: string }[];
+    side: 'before' | 'now';
+}) {
+    if (changes.length === 0) {
+        return <span className="text-tx3">—</span>;
+    }
+
+    return (
+        <div className="max-w-[220px] space-y-2">
+            {changes.map((change, index) => (
+                <div key={`${change.field}-${index}`}>
+                    <div className="text-[11px] text-tx3">{change.field}</div>
+                    <div className="text-xs font-medium break-all">
+                        {side === 'before'
+                            ? (change.before ?? '—')
+                            : change.now}
+                    </div>
+                </div>
+            ))}
+        </div>
+    );
+}
+
+export default function AccountLogs({
+    portal,
+    logs,
+    filters,
+    period,
+    account,
+    events,
+    branches,
+}: Props) {
+    const [search, setSearch] = useState(filters.search);
+    const admin = portal === 'admin';
+    // A partner sees a short log: when, account, Active / Inactive or the
+    // bank / UPI details changed. Not who or why (client request 2026-11-19).
+    const partner = portal === 'partner';
+    const accountsRoutes = admin
+        ? adminAccounts
+        : partner
+          ? partnerAccounts
+          : branchAccounts;
+
+    const query = (next: Partial<Filters & PeriodQuery>) =>
+        Object.fromEntries(
+            Object.entries({
+                ...filters,
+                ...('range' in next ? {} : periodQuery(period)),
+                search,
+                ...next,
+            }).filter(
+                ([, value]) =>
+                    value !== null &&
+                    value !== '' &&
+                    !(Array.isArray(value) && value.length === 0),
+            ),
+        ) as Record<string, string | string[]>;
+
+    const visit = (next: Partial<Filters & PeriodQuery>) =>
+        router.get(
+            accountsRoutes.logs.index({ query: query(next) }).url,
+            {},
+            { preserveState: true, replace: true },
+        );
+
+    useEffect(() => {
+        if (search === filters.search) return;
+        const timer = setTimeout(() => visit({ search }), 300);
+
+        return () => clearTimeout(timer);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [search]);
+
+    const columns: Column<Row>[] = [
+        {
+            key: 'at',
+            header: 'When',
+            cell: (row) => (
+                <span className="text-xs whitespace-nowrap">
+                    {formatDateTime(row.at)}
+                </span>
+            ),
+        },
+        {
+            key: 'account',
+            header: 'Account',
+            cell: (row) =>
+                row.account ? (
+                    <button
+                        type="button"
+                        onClick={() => visit({ account: row.account!.id })}
+                        className="text-left"
+                        title="Show only this account"
+                    >
+                        <div className="font-medium">{row.account.label}</div>
+                        {row.account.bank_name && (
+                            <div className="text-xs text-tx3">
+                                Bank:{' '}
+                                {[
+                                    row.account.holder,
+                                    row.account.bank_name,
+                                    row.account.account_number,
+                                ]
+                                    .filter(Boolean)
+                                    .join(' · ')}
+                            </div>
+                        )}
+                        {row.account.upi_id && (
+                            <div className="text-xs text-tx3">
+                                UPI:{' '}
+                                {[row.account.upi_name, row.account.upi_id]
+                                    .filter(Boolean)
+                                    .join(' · ')}
+                            </div>
+                        )}
+                    </button>
+                ) : (
+                    '—'
+                ),
+        },
+        {
+            key: 'change',
+            header: 'Change',
+            cell: (row) => (
+                <div className="space-y-1">
+                    <StatusBadge
+                        status={EVENT_STATUS[row.event] ?? 'pending'}
+                        label={row.event_label}
+                    />
+                    {partner && row.event === 'updated' && row.to && (
+                        <div className="text-xs text-tx3">
+                            Now {row.to === 'active' ? 'Active' : 'Inactive'}
+                        </div>
+                    )}
+                </div>
+            ),
+        },
+        {
+            key: 'before',
+            header: 'Before',
+            cell: (row) => <ChangeValues changes={row.changes} side="before" />,
+        },
+        {
+            key: 'now',
+            header: 'Now',
+            cell: (row) => <ChangeValues changes={row.changes} side="now" />,
+        },
+        ...(partner
+            ? []
+            : ([
+                  {
+                      key: 'who',
+                      header: 'Who',
+                      cell: (row) => (
+                          <div className="whitespace-nowrap">
+                              <div className="font-medium">{row.who?.name}</div>
+                              <div className="text-xs text-tx3">
+                                  {[
+                                      row.who?.username &&
+                                          `@${row.who.username}`,
+                                      row.who?.role,
+                                      row.who?.portal &&
+                                          PORTAL_LABEL[row.who.portal],
+                                  ]
+                                      .filter(Boolean)
+                                      .join(' · ')}
+                              </div>
+                          </div>
+                      ),
+                  },
+                  {
+                      key: 'reason',
+                      header: 'Reason',
+                      cell: (row) => (
+                          <span className="block max-w-[280px] text-xs text-tx2">
+                              {row.reason ?? '—'}
+                          </span>
+                      ),
+                  },
+              ] as Column<Row>[])),
+        // The IP stays in the CSV export, not on screen (client, 2026-10-28).
+        ...(admin ? [branchColumn] : []),
+    ];
+
+    return (
+        <>
+            <Head title="Account log" />
+            <PageHeader
+                title="Account log"
+                description={
+                    partner
+                        ? 'When your Bank & UPI accounts turned active or inactive, and changes to their bank or UPI details.'
+                        : admin
+                          ? 'Every change to branch Bank & UPI accounts: added, edited, verified, rejected, activated, paused, disabled and full numbers viewed, by branch users and PayGate staff. Entries can’t be changed or deleted.'
+                          : 'Every change to your Bank & UPI accounts: added, edited, verified, rejected, activated, turned off and full numbers viewed, by your users and PayGate staff. Entries can’t be changed or deleted.'
+                }
+                actions={
+                    <>
+                        <Link
+                            href={accountsRoutes.index().url}
+                            className="inline-flex h-8 items-center gap-1.5 rounded-[7px] border border-ln bg-sf px-3 text-[13px] font-medium"
+                        >
+                            <ArrowLeft className="size-3.5" /> Accounts
+                        </Link>
+                        <a
+                            href={
+                                accountsRoutes.logs.export({ query: query({}) })
+                                    .url
+                            }
+                            className="inline-flex h-8 items-center gap-1.5 rounded-[7px] border border-ln bg-sf px-3 text-[13px] font-medium"
+                        >
+                            <Download className="size-3.5" /> Export CSV
+                        </a>
+                    </>
+                }
+            />
+            <Panel className="overflow-hidden">
+                <PeriodFilter
+                    period={period}
+                    onChange={visit}
+                    className="border-b border-ln2 px-3 py-2.5"
+                />
+                <div className="flex flex-wrap items-center gap-2 border-b border-ln2 px-3 py-2.5">
+                    <SelectInput
+                        aria-label="Event"
+                        className="h-[30px] w-[180px] text-[12.5px]"
+                        value={filters.event ?? ''}
+                        onChange={(event) =>
+                            visit({ event: event.target.value || null })
+                        }
+                    >
+                        <option value="">All events</option>
+                        {events.map((event) => (
+                            <option key={event.value} value={event.value}>
+                                {event.label}
+                            </option>
+                        ))}
+                    </SelectInput>
+                    {admin && (
+                        <MultiSelect
+                            noun="branches"
+                            items={branches}
+                            selected={filters.branches}
+                            onChange={(ids) => visit({ branches: ids })}
+                            className="h-[30px] w-[200px] flex-none rounded-[7px] text-[12.5px]"
+                        />
+                    )}
+                    <label className="flex h-[30px] w-[280px] items-center gap-2 rounded-[7px] border border-ln px-2.5 text-tx3 focus-within:border-ac">
+                        <Search className="size-3.5" />
+                        <input
+                            value={search}
+                            onChange={(event) => setSearch(event.target.value)}
+                            placeholder={
+                                partner
+                                    ? 'Label, name, bank or last 4'
+                                    : 'Label, name, bank, last 4, person or reason'
+                            }
+                            className="w-full bg-transparent text-[12.5px] text-tx outline-none placeholder:text-tx3"
+                        />
+                    </label>
+                    {account && (
+                        <button
+                            type="button"
+                            onClick={() => visit({ account: null })}
+                            className="flex h-[30px] items-center gap-1.5 rounded-[7px] border border-ac px-2.5 text-[12.5px] text-ac"
+                        >
+                            {account.label}
+                            <X className="size-3.5" />
+                        </button>
+                    )}
+                    <div className="flex-1" />
+                    <span className="text-xs text-tx3">
+                        {logs.total.toLocaleString('en-IN')} entries · newest
+                        first
+                    </span>
+                </div>
+                <div className="overflow-x-auto">
+                    <DataTable
+                        columns={columns}
+                        rows={logs.data}
+                        rowKey={(row) => row.id}
+                        empty={
+                            <EmptyState title="No account changes in this period" />
+                        }
+                    />
+                </div>
+                {(logs.prev_page_url || logs.next_page_url) && (
+                    <div className="flex justify-end gap-2 px-3 py-2.5 text-xs">
+                        {logs.prev_page_url && (
+                            <Link
+                                href={logs.prev_page_url}
+                                className="rounded-[7px] border border-ln px-2.5 py-1"
+                            >
+                                ‹ Newer
+                            </Link>
+                        )}
+                        {logs.next_page_url && (
+                            <Link
+                                href={logs.next_page_url}
+                                className="rounded-[7px] border border-ln px-2.5 py-1"
+                            >
+                                Older ›
+                            </Link>
+                        )}
+                    </div>
+                )}
+            </Panel>
+        </>
+    );
+}

@@ -1,0 +1,1152 @@
+import { Head, router, useForm, usePage } from '@inertiajs/react';
+import {
+    Check,
+    Clock,
+    Copy,
+    ImageUp,
+    RefreshCw,
+    ShieldCheck,
+    X,
+} from 'lucide-react';
+import { useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
+import { useClipboard } from '@/hooks/use-clipboard';
+import { formatDateTime } from '@/lib/dates';
+import { formatPaise } from '@/lib/money';
+import { cn } from '@/lib/utils';
+import checkout from '@/routes/pay/checkout';
+import { cleanUtr } from '@/lib/utr';
+
+type Method = 'upi' | 'qr' | 'bank_transfer';
+
+type Props = {
+    /** Global Settings: support contact and published pages (G-48). */
+    support: { email: string | null; phone: string | null };
+    pages: { title: string; url: string }[];
+    token: string;
+    partner: { name: string; initials: string };
+    payin: {
+        reference: string;
+        order_id: string;
+        amount: number;
+        order_amount: number | null;
+        customer_name: string | null;
+        status: string;
+        method: Method | null;
+        utr: string | null;
+        created_at: string | null;
+        expires_at: string | null;
+        submitted_at: string | null;
+        completed_at: string | null;
+        amount_mismatch: boolean;
+    };
+    server_time: string;
+    methods: Method[];
+    account: {
+        holder: string | null;
+        bank_name: string | null;
+        account_number: string | null;
+        ifsc: string | null;
+        upi_id: string | null;
+        upi_name: string;
+        supports: Method[];
+        qr_svg: string | null;
+    } | null;
+    return_url: string | null;
+    proof: { max_kb: number; types: string[] };
+};
+
+const METHOD_INFO: Record<
+    Method,
+    { label: string; icon: string; sub: string }
+> = {
+    upi: { label: 'UPI', icon: 'UPI', sub: 'Pay with any UPI app · instant' },
+    bank_transfer: {
+        label: 'Bank transfer',
+        icon: '₹',
+        sub: 'IMPS / NEFT / RTGS · 2–10 min',
+    },
+    qr: { label: 'QR code', icon: 'QR', sub: 'Scan with any UPI app' },
+};
+
+/**
+ * Logos under the QR code (public/images/checkout/upi), each at its own
+ * width so none is stretched.
+ */
+const UPI_LOGOS: [string, string][] = [
+    ['upi', 'UPI'],
+    ['gpay', 'Google Pay'],
+    ['phonepe', 'PhonePe'],
+    ['paytm', 'Paytm'],
+];
+
+/**
+ * The customer's payment page (design: checkout). States: choose a method →
+ * pay (UPI / bank / QR) and submit the UTR and a screenshot → verifying →
+ * success; or failed / expired / unavailable.
+ */
+export default function Checkout(props: Props) {
+    const { partner, payin, account } = props;
+    const status = payin.status;
+    const open = status === 'created' || status === 'awaiting_payment';
+    const waiting = [
+        'payment_submitted',
+        'payment_detected',
+        'under_review',
+    ].includes(status);
+    const [choosing, setChoosing] = useState(!account);
+
+    useEffect(() => setChoosing(!account), [account]);
+
+    // While the branch checks the payment, look for the result every 5 s.
+    useEffect(() => {
+        if (!waiting) return;
+        const timer = setInterval(
+            () => router.reload({ only: ['payin', 'account'] }),
+            5000,
+        );
+
+        return () => clearInterval(timer);
+    }, [waiting]);
+
+    return (
+        <div
+            data-portal="partner"
+            className="flex min-h-screen justify-center bg-[#f3f4f7] sm:py-8"
+        >
+            <Head title={`Pay ${partner.name}`} />
+            <div className="flex w-full max-w-[420px] flex-col overflow-hidden bg-white text-[14px] text-[#0F172A] sm:rounded-[28px] sm:border sm:border-[#E4E7EC] sm:shadow-[0_30px_80px_rgba(15,23,42,.14)]">
+                <header className="flex items-center gap-3 border-b border-[#EEF0F3] px-5 py-3.5">
+                    <ShieldCheck className="size-7 flex-none text-[#047857]" />
+                    <div className="min-w-0 flex-1">
+                        <div className="text-[15px] font-semibold">
+                            Secure Checkout
+                        </div>
+                        <div className="text-xs text-[#64748B]">
+                            Complete payment within session time
+                        </div>
+                    </div>
+                </header>
+
+                {(open || waiting) && <AmountCard {...props} ticking={open} />}
+
+                <main className="flex flex-1 flex-col gap-3 px-5 py-4">
+                    {open && choosing && (
+                        <ChooseMethod
+                            {...props}
+                            onChosen={() => setChoosing(false)}
+                            onCancel={
+                                account ? () => setChoosing(false) : undefined
+                            }
+                        />
+                    )}
+                    {open && !choosing && account && (
+                        <PayView
+                            {...props}
+                            onChooseAnother={() => setChoosing(true)}
+                        />
+                    )}
+                    {waiting && payin.amount_mismatch && (
+                        <Result
+                            tone="failed"
+                            title="The amount doesn’t match"
+                            body={`The bank received UTR ${payin.utr}, but not for ${formatPaise(payin.amount)}. Only the exact amount of this order can be added to your ${partner.name} account.`}
+                            rows={[
+                                ['Order amount', formatPaise(payin.amount)],
+                                ['UTR', payin.utr ?? '—'],
+                                ['Order ID', payin.order_id],
+                            ]}
+                            note={`Check the UTR and the amount you paid in your UPI or bank app. If you paid a different amount, this order will be declined: contact ${partner.name} support with your Order ID and UTR.`}
+                            action={
+                                props.return_url
+                                    ? {
+                                          label: `Back to ${partner.name}`,
+                                          href: props.return_url,
+                                      }
+                                    : undefined
+                            }
+                        />
+                    )}
+                    {waiting && !payin.amount_mismatch && (
+                        <Result
+                            tone="pending"
+                            title="Verifying your payment"
+                            body="The receiving bank account is being checked for your transfer. This usually takes a few minutes — you can keep this page open, it updates by itself."
+                            rows={[
+                                ['Amount', formatPaise(payin.amount)],
+                                ['UTR', payin.utr ?? 'Screenshot sent'],
+                                ['Order ID', payin.order_id],
+                            ]}
+                            note={`Your payment will reflect in your ${partner.name} account within a few minutes. Only the exact amount of this order is added, so pay exactly ${formatPaise(payin.amount)}. You don’t need to wait on this page.`}
+                            action={
+                                props.return_url
+                                    ? {
+                                          label: `Back to ${partner.name}`,
+                                          href: props.return_url,
+                                      }
+                                    : undefined
+                            }
+                        />
+                    )}
+                    {status === 'success' && (
+                        <Result
+                            tone="success"
+                            title="Payment successful"
+                            body={`${formatPaise(payin.amount)} has been received by ${partner.name}.`}
+                            rows={[
+                                ['Amount paid', formatPaise(payin.amount)],
+                                ...(payin.order_amount !== null
+                                    ? [
+                                          [
+                                              'Order amount',
+                                              formatPaise(payin.order_amount),
+                                          ] as [string, string],
+                                      ]
+                                    : []),
+                                ['Reference', payin.utr ?? payin.reference],
+                                ['Paid on', formatDateTime(payin.completed_at)],
+                            ]}
+                            action={
+                                props.return_url
+                                    ? {
+                                          label: `Return to ${partner.name}`,
+                                          href: props.return_url,
+                                      }
+                                    : undefined
+                            }
+                        />
+                    )}
+                    {status === 'rejected' && (
+                        <Result
+                            tone="failed"
+                            title="Payment could not be verified"
+                            body="The payment could not be matched. If money left your account, contact the merchant with the reference below."
+                            rows={[
+                                ['Amount', formatPaise(payin.amount)],
+                                ['Order ID', payin.order_id],
+                                ['Reference', payin.reference],
+                            ]}
+                            action={
+                                props.return_url
+                                    ? {
+                                          label: `Return to ${partner.name}`,
+                                          href: props.return_url,
+                                      }
+                                    : undefined
+                            }
+                        />
+                    )}
+                    {status === 'expired' && (
+                        <Result
+                            tone="expired"
+                            title="Payment session expired"
+                            body="Do not transfer to the old account details. Start a new payment from the merchant’s site instead."
+                            note={`Already paid before the time ran out? Your money is not lost. Keep your UTR and payment screenshot, and contact ${partner.name} support with Order ID ${payin.order_id}: the payment is checked against the bank and credited.`}
+                            rows={[
+                                ['Amount', formatPaise(payin.amount)],
+                                ['Order ID', payin.order_id],
+                                [
+                                    'Expired at',
+                                    formatDateTime(
+                                        payin.completed_at ?? payin.expires_at,
+                                    ),
+                                ],
+                            ]}
+                            action={
+                                props.return_url
+                                    ? {
+                                          label: `Back to ${partner.name}`,
+                                          href: props.return_url,
+                                      }
+                                    : undefined
+                            }
+                        />
+                    )}
+                </main>
+
+                <footer className="flex flex-col gap-1.5 border-t border-[#EEF0F3] px-5 py-3 text-[11.5px] text-[#64748B]">
+                    <div className="flex justify-between">
+                        <span className="font-mono">{payin.reference}</span>
+                        <span>
+                            Secured by <b className="text-[#0F172A]">PayGate</b>
+                        </span>
+                    </div>
+                    {(props.support.email ||
+                        props.support.phone ||
+                        props.pages.length > 0) && (
+                        <div className="flex flex-wrap justify-between gap-x-3 gap-y-1">
+                            <span>
+                                {(props.support.email || props.support.phone) &&
+                                    'Help: '}
+                                {props.support.email && (
+                                    <a
+                                        href={`mailto:${props.support.email}`}
+                                        className="underline"
+                                    >
+                                        {props.support.email}
+                                    </a>
+                                )}
+                                {props.support.email &&
+                                    props.support.phone &&
+                                    ' · '}
+                                {props.support.phone && (
+                                    <a
+                                        href={`tel:${props.support.phone}`}
+                                        className="underline"
+                                    >
+                                        {props.support.phone}
+                                    </a>
+                                )}
+                            </span>
+                            <span className="flex gap-2">
+                                {props.pages.map((page) => (
+                                    <a
+                                        key={page.url}
+                                        href={page.url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="underline"
+                                    >
+                                        {page.title}
+                                    </a>
+                                ))}
+                            </span>
+                        </div>
+                    )}
+                </footer>
+            </div>
+        </div>
+    );
+}
+
+/**
+ * Seconds left in the payment session, by the server's clock. With `expire`,
+ * the page reloads when time is up so the server shows the expired state.
+ */
+function useSecondsLeft(
+    expiresAt: string | null,
+    serverTime: string,
+    ticking: boolean,
+    expire = false,
+): { left: number | null; deadline: number | null } {
+    const [offset] = useState(
+        () => new Date(serverTime).getTime() - Date.now(),
+    );
+    const deadline = expiresAt ? new Date(expiresAt).getTime() : null;
+    const [now, setNow] = useState(() => Date.now() + offset);
+
+    useEffect(() => {
+        if (!ticking || deadline === null) return;
+        const timer = setInterval(() => {
+            const current = Date.now() + offset;
+            setNow(current);
+
+            // Time is up: let the server expire it and show the expired state.
+            if (current >= deadline) {
+                clearInterval(timer);
+                if (expire) router.reload();
+            }
+        }, 1000);
+
+        return () => clearInterval(timer);
+    }, [ticking, deadline, offset, expire]);
+
+    return {
+        deadline,
+        left:
+            deadline === null
+                ? null
+                : Math.max(0, Math.floor((deadline - now) / 1000)),
+    };
+}
+
+/** Why "I've made the payment" failed, when it isn't a field error. */
+function submitProblem(status: number, maxKb: number): string {
+    switch (status) {
+        case 413:
+            return `The screenshot is too large. Upload one under ${Math.round(maxKb / 1024)} MB.`;
+        case 419:
+            return 'This page was open too long and needs a refresh. Refresh the page, then enter the UTR and screenshot again.';
+        case 429:
+            return 'Too many tries in a short time. Wait one minute, then tap “I’ve made the payment” again.';
+        case 404:
+        case 410:
+            return 'This payment link is no longer valid. If you already paid, contact the merchant’s support with your Order ID and UTR.';
+        default:
+            return 'Something went wrong on our side and your details were not saved. Your money is safe: wait a moment and tap “I’ve made the payment” again. If it keeps happening, contact the merchant’s support with your Order ID and UTR.';
+    }
+}
+
+function AmountCard({
+    payin,
+    server_time,
+    ticking,
+}: Props & { ticking: boolean }) {
+    const { left, deadline } = useSecondsLeft(
+        payin.expires_at,
+        server_time,
+        ticking,
+        true,
+    );
+    const total =
+        deadline === null || payin.created_at === null
+            ? 1
+            : Math.max(
+                  1,
+                  (deadline - new Date(payin.created_at).getTime()) / 1000,
+              );
+    const urgent = left !== null && left < 120;
+
+    return (
+        <div className="mx-5 mt-4 rounded-[14px] border border-[#EEF0F3] bg-[#F8FAFC] px-4 py-3">
+            <div className="text-xs text-[#64748B]">Amount to pay</div>
+            <div className="mt-0.5 text-[30px] leading-tight font-bold tracking-[-.02em]">
+                {formatPaise(payin.amount)}
+            </div>
+            <div className="mt-1.5 flex items-center justify-between text-xs text-[#475569]">
+                <span>
+                    Order <span className="font-mono">{payin.order_id}</span>
+                </span>
+                {ticking && left !== null && (
+                    <span
+                        className={cn(
+                            'inline-flex items-center gap-1 font-semibold',
+                            urgent ? 'text-[#B91C1C]' : 'text-ac',
+                        )}
+                    >
+                        <Clock className="size-3.5" />
+                        {Math.floor(left / 60)}:
+                        {String(left % 60).padStart(2, '0')}
+                    </span>
+                )}
+            </div>
+            {ticking && left !== null && (
+                <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-[#E4E7EC]">
+                    <div
+                        className={cn(
+                            'h-full',
+                            urgent ? 'bg-[#B91C1C]' : 'bg-ac',
+                        )}
+                        style={{
+                            width: `${Math.min(100, (left / total) * 100)}%`,
+                        }}
+                    />
+                </div>
+            )}
+        </div>
+    );
+}
+
+function ChooseMethod({
+    token,
+    methods,
+    payin,
+    onChosen,
+    onCancel,
+}: Props & { onChosen: () => void; onCancel?: () => void }) {
+    const form = useForm({ method: '' as string });
+    const error = (usePage().props.errors as Record<string, string>).method;
+
+    // Close the list on success even when the account stays the same (the
+    // method switches on the same account, or the same method is picked
+    // again), so the props don't change.
+    const choose = (method: Method) => {
+        form.transform(() => ({ method }));
+        form.post(checkout.method(token).url, {
+            preserveScroll: true,
+            onSuccess: onChosen,
+        });
+    };
+
+    return (
+        <>
+            <div className="text-[15px] font-semibold">Choose how to pay</div>
+            {error && (
+                <div className="flex items-start gap-2 rounded-xl bg-[#FFFBEB] px-3 py-2.5 text-[13px] text-[#B45309]">
+                    <Clock className="mt-0.5 size-4 flex-none" /> {error}
+                </div>
+            )}
+            {methods.map((method) => (
+                <button
+                    key={method}
+                    type="button"
+                    disabled={form.processing}
+                    onClick={() => choose(method)}
+                    className={cn(
+                        'flex items-center gap-3 rounded-[14px] border px-4 py-3.5 text-left hover:border-ac disabled:opacity-60',
+                        payin.method === method
+                            ? 'border-ac bg-acs'
+                            : 'border-[#E4E7EC]',
+                    )}
+                >
+                    <span className="grid size-10 place-items-center rounded-[10px] bg-acs text-xs font-bold text-act">
+                        {METHOD_INFO[method].icon}
+                    </span>
+                    <span className="flex-1">
+                        <span className="block font-semibold">
+                            {METHOD_INFO[method].label}
+                        </span>
+                        <span className="block text-xs text-[#64748B]">
+                            {METHOD_INFO[method].sub}
+                        </span>
+                    </span>
+                    <span className="text-[#94A3B8]">›</span>
+                </button>
+            ))}
+            {methods.length === 0 && (
+                <p className="text-[13px] text-[#64748B]">
+                    No payment method is available right now. Please try again
+                    in a few minutes or contact the merchant.
+                </p>
+            )}
+            {onCancel && (
+                <button
+                    type="button"
+                    onClick={onCancel}
+                    className="text-[13px] font-medium text-[#475569]"
+                >
+                    ← Back to payment details
+                </button>
+            )}
+        </>
+    );
+}
+
+function PayView({
+    token,
+    payin,
+    account,
+    methods,
+    proof,
+    server_time,
+    onChooseAnother,
+}: Props & { onChooseAnother: () => void }) {
+    const form = useForm<{ utr: string; photo: File | null }>({
+        utr: '',
+        photo: null,
+    });
+    // A failure that isn't about one field (time out, too many tries, server).
+    const [problem, setProblem] = useState<string | null>(null);
+    const { left } = useSecondsLeft(payin.expires_at, server_time, true);
+    const fieldError =
+        form.errors.utr ??
+        form.errors.photo ??
+        Object.values(form.errors as Record<string, string>)[0];
+
+    const choosePhoto = (file: File | null) => {
+        setProblem(null);
+        form.clearErrors('photo');
+
+        if (file === null) {
+            form.setData('photo', null);
+
+            return;
+        }
+
+        const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+
+        if (!proof.types.includes(extension)) {
+            form.setData('photo', null);
+            form.setError(
+                'photo',
+                `This file type can’t be used. Upload a screenshot as ${proof.types.join(', ').toUpperCase()}.`,
+            );
+
+            return;
+        }
+
+        if (file.size > proof.max_kb * 1024) {
+            form.setData('photo', null);
+            form.setError(
+                'photo',
+                `The screenshot is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Upload one under ${Math.round(proof.max_kb / 1024)} MB.`,
+            );
+
+            return;
+        }
+
+        form.setData('photo', file);
+    };
+    const switcher = useForm({ method: '' as string });
+    const tabs = methods.filter((method) => account!.supports.includes(method));
+    const current = (payin.method ?? tabs[0]) as Method;
+
+    const switchTo = (method: Method) => {
+        if (method === current) return;
+        switcher.transform(() => ({ method }));
+        switcher.post(checkout.method(token).url, { preserveScroll: true });
+    };
+
+    return (
+        <>
+            {tabs.length > 1 && (
+                <div className="grid grid-flow-col gap-1 rounded-xl bg-[#F1F5F9] p-1">
+                    {tabs.map((method) => (
+                        <button
+                            key={method}
+                            type="button"
+                            onClick={() => switchTo(method)}
+                            className={cn(
+                                'h-8 rounded-lg text-[13px]',
+                                method === current
+                                    ? 'bg-white font-semibold shadow-[0_1px_2px_rgba(15,23,42,.1)]'
+                                    : 'font-medium text-[#475569]',
+                            )}
+                        >
+                            {METHOD_INFO[method].label}
+                        </button>
+                    ))}
+                </div>
+            )}
+
+            {current === 'bank_transfer' && account!.account_number && (
+                <>
+                    <div className="rounded-[14px] border border-[#E4E7EC] px-4 pt-3.5 pb-1">
+                        <div className="text-[15px] font-medium">
+                            Bank Account Details
+                        </div>
+                        <DetailRow
+                            label="Bank name"
+                            value={account!.bank_name ?? ''}
+                            upper
+                        />
+                        <DetailRow
+                            label="Holder name"
+                            value={account!.holder ?? ''}
+                            upper
+                        />
+                        <DetailRow
+                            label="Account no"
+                            value={account!.account_number}
+                        />
+                        <DetailRow
+                            label="IFSC code"
+                            value={account!.ifsc ?? ''}
+                            upper
+                        />
+                        {account!.upi_id && (
+                            <DetailRow label="UPI ID" value={account!.upi_id} />
+                        )}
+                    </div>
+                    <Note>
+                        Transfer the <b>exact amount</b> by IMPS / NEFT from
+                        your bank app. These details are for this payment only —
+                        don’t save them for later.
+                    </Note>
+                </>
+            )}
+
+            {current === 'upi' && account!.upi_id && (
+                <>
+                    <YonoWarning />
+                    <div className="overflow-hidden rounded-[14px] border border-[#E4E7EC]">
+                        <CopyRow
+                            label="Pay to UPI ID"
+                            value={account!.upi_id}
+                            mono
+                            big
+                        />
+                        <CopyRow
+                            label="Name"
+                            value={account!.upi_name}
+                            copyable={false}
+                        />
+                        <CopyRow
+                            label="Amount"
+                            value={formatPaise(payin.amount)}
+                            copyValue={(payin.amount / 100).toFixed(2)}
+                        />
+                    </div>
+                    <Note>
+                        Pay the exact amount. Your UPI app will show a 12-digit
+                        UTR / reference number after paying.
+                    </Note>
+                </>
+            )}
+
+            {current === 'qr' && account!.qr_svg && (
+                <>
+                    <YonoWarning />
+                    <div className="flex flex-col items-center gap-2 rounded-[14px] border border-[#E4E7EC] p-4">
+                        <div
+                            className="size-[220px] [&_svg]:size-full"
+                            dangerouslySetInnerHTML={{
+                                __html: account!.qr_svg,
+                            }}
+                        />
+                        <div className="text-center text-xs text-[#64748B]">
+                            Scan with any UPI app. The amount is filled in for
+                            you.
+                        </div>
+                        <div className="flex items-center gap-4">
+                            {UPI_LOGOS.map(([file, name]) => (
+                                <img
+                                    key={file}
+                                    src={`/images/checkout/upi/${file}.png`}
+                                    alt={name}
+                                    className="h-8 w-auto"
+                                />
+                            ))}
+                        </div>
+                    </div>
+                </>
+            )}
+
+            <ChangeDetails token={token} />
+
+            <form
+                className="flex flex-col gap-3 border-t border-[#EEF0F3] pt-3"
+                onSubmit={(event) => {
+                    event.preventDefault();
+                    setProblem(null);
+                    form.post(checkout.proof(token).url, {
+                        forceFormData: true,
+                        preserveScroll: true,
+                        onHttpException: (response) => {
+                            setProblem(
+                                submitProblem(response.status, proof.max_kb),
+                            );
+
+                            return false;
+                        },
+                        onNetworkError: () => {
+                            setProblem(
+                                'No internet connection. Check your connection, then tap “I’ve made the payment” again. Your details are still filled in.',
+                            );
+
+                            return false;
+                        },
+                    });
+                }}
+            >
+                {left !== null && left > 0 && left <= 120 && (
+                    <div
+                        role="alert"
+                        className="rounded-xl border border-[#FECACA] bg-[#FEF2F2] px-3 py-2.5 text-[12.5px] text-[#B91C1C]"
+                    >
+                        <b>
+                            {left < 60
+                                ? 'Less than a minute left.'
+                                : 'Less than 2 minutes left.'}
+                        </b>{' '}
+                        Already paid? Enter the UTR and upload the screenshot
+                        now, before this payment expires.
+                    </div>
+                )}
+                <label className="flex flex-col gap-1.5 text-[13px] font-medium">
+                    <span>
+                        UTR / reference number{' '}
+                        <span className="text-[#B91C1C]">*</span>{' '}
+                        <span className="font-normal text-[#64748B]">
+                            {current === 'bank_transfer'
+                                ? '(12-digit IMPS number, or NEFT / RTGS reference)'
+                                : '(12 digits, from your UPI app)'}
+                        </span>
+                    </span>
+                    <input
+                        required
+                        inputMode={
+                            current === 'bank_transfer' ? 'text' : 'numeric'
+                        }
+                        autoCapitalize="characters"
+                        autoComplete="off"
+                        placeholder={
+                            current === 'bank_transfer'
+                                ? 'e.g. 626812820491 or HDFCN52026092812'
+                                : 'e.g. 626812820491'
+                        }
+                        value={form.data.utr}
+                        onChange={(event) =>
+                            form.setData(
+                                'utr',
+                                cleanUtr(
+                                    event.target.value,
+                                    current === 'bank_transfer',
+                                ),
+                            )
+                        }
+                        className="h-11 rounded-xl border border-[#E4E7EC] px-3 font-mono text-[15px] outline-none focus:border-ac focus:ring-[3px] focus:ring-acs"
+                    />
+                </label>
+                <label className="flex cursor-pointer items-center gap-2.5 rounded-xl border border-dashed border-[#CBD5E1] px-3 py-2.5 text-[13px] text-[#475569] hover:border-ac">
+                    <ImageUp className="size-4 flex-none" />
+                    <span className="flex-1 truncate">
+                        {form.data.photo ? (
+                            form.data.photo.name
+                        ) : (
+                            <>
+                                Upload a screenshot of the payment{' '}
+                                <span className="text-[#B91C1C]">*</span>
+                            </>
+                        )}
+                    </span>
+                    {form.data.photo && (
+                        <button
+                            type="button"
+                            onClick={(event) => {
+                                event.preventDefault();
+                                form.setData('photo', null);
+                            }}
+                        >
+                            <X className="size-4" />
+                        </button>
+                    )}
+                    {/* No `required`: the browser's warning would point at a
+                        hidden input; the button stays disabled until a
+                        screenshot is chosen, and says so. */}
+                    <input
+                        type="file"
+                        className="sr-only"
+                        accept={proof.types.map((type) => `.${type}`).join(',')}
+                        onChange={(event) =>
+                            choosePhoto(event.target.files?.[0] ?? null)
+                        }
+                    />
+                </label>
+                {(fieldError || problem) && (
+                    <p
+                        role="alert"
+                        className="rounded-lg bg-[#FEF2F2] px-3 py-2 text-[12.5px] text-[#B91C1C]"
+                    >
+                        {fieldError ?? problem}
+                    </p>
+                )}
+                <button
+                    type="submit"
+                    disabled={
+                        form.processing ||
+                        form.data.utr.trim() === '' ||
+                        form.data.photo === null
+                    }
+                    className="h-12 rounded-xl bg-brand text-[15px] font-semibold text-white disabled:opacity-50"
+                >
+                    {form.processing ? 'Sending…' : 'I’ve made the payment'}
+                </button>
+                {!form.processing &&
+                    (form.data.utr.trim() === '' ||
+                        form.data.photo === null) && (
+                        <p className="-mt-1 text-center text-[12px] text-[#64748B]">
+                            {form.data.utr.trim() === '' &&
+                            form.data.photo === null
+                                ? 'Enter the UTR and upload the screenshot to continue.'
+                                : form.data.utr.trim() === ''
+                                  ? 'Enter the UTR to continue.'
+                                  : 'Upload the screenshot to continue.'}
+                        </p>
+                    )}
+            </form>
+            <button
+                type="button"
+                onClick={onChooseAnother}
+                className="text-[13px] font-medium text-[#475569]"
+            >
+                ← Choose another method
+            </button>
+            <PaymentRules />
+        </>
+    );
+}
+
+/**
+ * "Try different payment details": when the account shown doesn't work for
+ * the customer, they get another one for the same method and payment.
+ */
+function ChangeDetails({ token }: { token: string }) {
+    const [confirming, setConfirming] = useState(false);
+    const form = useForm({});
+    const error = (usePage().props.errors as Record<string, string>).change;
+
+    const change = () =>
+        form.post(checkout.changeAccount(token).url, {
+            preserveScroll: true,
+            onFinish: () => setConfirming(false),
+        });
+
+    if (!confirming) {
+        return (
+            <>
+                {error && (
+                    <div className="flex items-start gap-2 rounded-xl bg-[#FFFBEB] px-3 py-2.5 text-[13px] text-[#B45309]">
+                        <Clock className="mt-0.5 size-4 flex-none" /> {error}
+                    </div>
+                )}
+                <button
+                    type="button"
+                    onClick={() => setConfirming(true)}
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-ac bg-brand text-[13px] font-semibold text-white transition-colors hover:bg-acs hover:bg-none hover:text-act hover:shadow-none"
+                >
+                    <RefreshCw className="size-4" />
+                    Having trouble paying? Get different details
+                </button>
+            </>
+        );
+    }
+
+    return (
+        <div className="flex flex-col gap-2.5 rounded-xl border border-[#FDE68A] bg-[#FFFBEB] px-3 py-3 text-[12.5px] leading-relaxed text-[#92400E]">
+            <span>
+                <b className="font-semibold">Haven’t paid yet?</b> You’ll get
+                new payment details for the same amount, and the details shown
+                now will stop working. If you already paid, don’t change — enter
+                your UTR below instead.
+            </span>
+            <div className="flex gap-2">
+                <button
+                    type="button"
+                    disabled={form.processing}
+                    onClick={change}
+                    className="h-9 flex-1 rounded-lg bg-brand text-[13px] font-semibold text-white disabled:opacity-60"
+                >
+                    {form.processing
+                        ? 'Getting new details…'
+                        : 'Get new details'}
+                </button>
+                <button
+                    type="button"
+                    disabled={form.processing}
+                    onClick={() => setConfirming(false)}
+                    className="h-9 flex-1 rounded-lg border border-[#E4E7EC] bg-white text-[13px] font-medium text-[#475569]"
+                >
+                    Cancel
+                </button>
+            </div>
+        </div>
+    );
+}
+
+function CopyRow({
+    label,
+    value,
+    copyValue,
+    mono,
+    big,
+    copyable = true,
+}: {
+    label: string;
+    value: string;
+    copyValue?: string;
+    mono?: boolean;
+    big?: boolean;
+    copyable?: boolean;
+}) {
+    const [copied, copy] = useClipboard();
+    const target = copyValue ?? value;
+
+    return (
+        <div className="flex items-center gap-3 border-b border-[#EEF0F3] px-3.5 py-2.5 last:border-b-0">
+            <div className="min-w-0 flex-1">
+                <div className="text-[11.5px] text-[#64748B]">{label}</div>
+                <div
+                    className={cn(
+                        'break-all',
+                        mono && 'font-mono',
+                        big
+                            ? 'text-[15px] font-semibold'
+                            : 'text-[14px] font-medium',
+                    )}
+                >
+                    {value}
+                </div>
+            </div>
+            {copyable && (
+                <button
+                    type="button"
+                    onClick={() => copy(target)}
+                    className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#E4E7EC] px-2.5 text-xs font-medium"
+                >
+                    {copied === target ? (
+                        <Check className="size-3.5 text-[#047857]" />
+                    ) : (
+                        <Copy className="size-3.5" />
+                    )}
+                    {copied === target ? 'Copied' : 'Copy'}
+                </button>
+            )}
+        </div>
+    );
+}
+
+/**
+ * One line of Bank Account Details (bank transfer tab): label on the left,
+ * the value and a copy icon on the right.
+ */
+function DetailRow({
+    label,
+    value,
+    upper,
+}: {
+    label: string;
+    value: string;
+    upper?: boolean;
+}) {
+    const [copied, copy] = useClipboard();
+
+    return (
+        <div className="flex items-center gap-3 border-b border-[#EEF0F3] py-3 last:border-b-0">
+            <span className="flex-none text-[12.5px] font-semibold text-[#64748B] uppercase">
+                {label}
+            </span>
+            <span
+                className={cn(
+                    'min-w-0 flex-1 text-right text-[14px] font-semibold break-all',
+                    upper && 'uppercase',
+                )}
+            >
+                {value}
+            </span>
+            <button
+                type="button"
+                onClick={() => copy(value)}
+                aria-label={`Copy ${label}`}
+                title={copied === value ? 'Copied' : `Copy ${label}`}
+                className="grid size-7 flex-none place-items-center rounded-md text-[#16A34A] hover:bg-[#F0FDF4]"
+            >
+                {copied === value ? (
+                    <Check className="size-[18px]" />
+                ) : (
+                    <Copy className="size-[18px]" />
+                )}
+            </button>
+        </div>
+    );
+}
+
+/**
+ * UPI payments from Yono SBI may fail, so the UPI and QR code tabs ask the
+ * payer, in English and Hindi, to use another app. The image keeps the
+ * box's background colour.
+ */
+function YonoWarning() {
+    return (
+        <div className="flex items-center gap-3 rounded-xl border border-[#F5E6A8] bg-[#FDFBED] px-3 py-2.5 text-[#B45F2A]">
+            <img
+                src="/images/checkout/no-yono-sbi.png"
+                alt="Yono SBI crossed out"
+                className="size-16 flex-none"
+            />
+            <div className="flex flex-col gap-1 text-[12.5px] leading-snug">
+                <b className="text-[13px] tracking-wide">WARNING :</b>
+                <span>
+                    Please do not use Yono SBI for UPI payments, as the payment
+                    may fail.
+                </span>
+                <span lang="hi">
+                    कृपया UPI भुगतान के लिए Yono SBI का उपयोग न करें, क्योंकि भुगतान
+                    असफल हो सकता है।
+                </span>
+            </div>
+        </div>
+    );
+}
+
+/** The bottom of the payment step: the two rules that cost payers money. */
+function PaymentRules() {
+    return (
+        <div className="flex flex-col gap-1 rounded-xl border border-[#F5E6A8] bg-[#FDFBED] px-3 py-2.5 text-[12.5px] leading-snug text-[#B45F2A]">
+            <span>
+                - Do not send a different amount than what is in the deposit
+                request.
+            </span>
+            <span>
+                - Do not save the details of our collection account, such as the
+                UPI ID or QR code for the next payment. We frequently update our
+                collection accounts and using old details may result in money
+                loss.
+            </span>
+        </div>
+    );
+}
+
+function Note({ children }: { children: ReactNode }) {
+    return (
+        <div className="rounded-xl bg-[#F8FAFC] px-3 py-2.5 text-[12.5px] leading-relaxed text-[#475569]">
+            {children}
+        </div>
+    );
+}
+
+const TONES = {
+    pending: {
+        bg: 'bg-[#F5F3FF]',
+        fg: 'text-[#6D28D9]',
+        ring: 'ring-[#DDD6FE]',
+        icon: <Clock className="size-7" />,
+    },
+    success: {
+        bg: 'bg-[#ECFDF5]',
+        fg: 'text-[#047857]',
+        ring: 'ring-[#A7F3D0]',
+        icon: <Check className="size-7" />,
+    },
+    failed: {
+        bg: 'bg-[#FEF2F2]',
+        fg: 'text-[#B91C1C]',
+        ring: 'ring-[#FECACA]',
+        icon: <X className="size-7" />,
+    },
+    expired: {
+        bg: 'bg-[#FFFBEB]',
+        fg: 'text-[#B45309]',
+        ring: 'ring-[#FDE68A]',
+        icon: <Clock className="size-7" />,
+    },
+};
+
+function Result({
+    tone,
+    title,
+    body,
+    rows,
+    note,
+    action,
+}: {
+    tone: keyof typeof TONES;
+    title: string;
+    body: string;
+    rows: [string, string][];
+    note?: string;
+    action?: { label: string; href: string };
+}) {
+    const style = TONES[tone];
+
+    return (
+        <div className="flex flex-col items-center gap-3 py-4 text-center">
+            <div
+                className={cn(
+                    'grid size-16 place-items-center rounded-full ring-[3px]',
+                    style.bg,
+                    style.fg,
+                    style.ring,
+                )}
+            >
+                {style.icon}
+            </div>
+            <div className="text-lg font-semibold">{title}</div>
+            <p className="text-[13px] leading-relaxed text-[#475569]">{body}</p>
+            <div className="mt-1 w-full overflow-hidden rounded-[14px] border border-[#EEF0F3] text-left">
+                {rows.map(([label, value]) => (
+                    <div
+                        key={label}
+                        className="flex justify-between gap-3 border-b border-[#EEF0F3] px-3.5 py-2.5 text-[13px] last:border-b-0"
+                    >
+                        <span className="text-[#64748B]">{label}</span>
+                        <span className="font-medium break-all">{value}</span>
+                    </div>
+                ))}
+            </div>
+            {note && (
+                <div className="w-full rounded-[14px] border border-[#DBEAFE] bg-[#EFF6FF] px-3.5 py-3 text-left text-[12.5px] leading-relaxed text-[#1E3A8A]">
+                    <b className="font-semibold">Note:</b> {note}
+                </div>
+            )}
+            {action && (
+                <a
+                    href={action.href}
+                    className="mt-1 grid h-12 w-full place-items-center rounded-xl bg-brand text-[15px] font-semibold text-white"
+                >
+                    {action.label}
+                </a>
+            )}
+        </div>
+    );
+}

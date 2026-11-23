@@ -1,0 +1,87 @@
+<?php
+
+namespace App\Http\Admin\Platform;
+
+use App\Domain\Partner\Models\Partner;
+use App\Domain\Partner\Models\PartnerIpRule;
+use App\Domain\PartnerApi\Models\ApiRequestLog;
+use App\Http\Controller;
+use App\Support\ApiEnvironment;
+use Illuminate\Support\Facades\Gate;
+use Inertia\Inertia;
+use Inertia\Response;
+
+/**
+ * IP Management (Admin): every partner's API allow-list in one place, with
+ * the addresses that actually called in the last 7 days and how many calls
+ * were refused. Lists are edited on the partner (API & security).
+ */
+class IpManagementController extends Controller
+{
+    public function index(): Response
+    {
+        Gate::authorize('ip_rules.view');
+
+        $since = now()->subDays(7);
+        $rules = [];
+
+        foreach (PartnerIpRule::query()->get(['partner_id', 'cidr']) as $rule) {
+            $rules[$rule->partner_id][] = $rule->cidr;
+        }
+
+        $calls = [];
+
+        foreach (ApiRequestLog::query()
+            ->where('created_at', '>=', $since)
+            ->whereNotNull('partner_id')
+            ->toBase()
+            ->selectRaw('partner_id, ip, COUNT(*) AS calls, COUNT(*) FILTER (WHERE status_code = 403) AS refused, MAX(created_at) AS last_at')
+            ->groupBy('partner_id', 'ip')
+            ->orderByDesc('calls')
+            ->get() as $row) {
+            $calls[(string) $row->partner_id][] = ['ip' => $row->ip, 'calls' => (int) $row->calls, 'refused' => (int) $row->refused, 'last_at' => $row->last_at];
+        }
+
+        $partners = [];
+
+        foreach (Partner::query()->orderBy('name')->get(['id', 'code', 'name', 'status']) as $partner) {
+            $partners[] = [
+                'id' => $partner->id,
+                'code' => $partner->code,
+                'name' => $partner->name,
+                'status' => $partner->status->value,
+                'rules' => $rules[$partner->id] ?? [],
+                'calls' => $calls[$partner->id] ?? [],
+            ];
+        }
+
+        // Calls with a key of another server or an unknown key (client
+        // request 2026-11-23): a partner URL still pointing at the wrong server.
+        $wrongServer = ApiRequestLog::query()
+            ->where('created_at', '>=', $since)
+            ->whereIn('error_code', ['wrong_environment', 'unauthenticated'])
+            ->whereNotNull('key_id_sent')
+            ->toBase()
+            ->selectRaw('key_id_sent, error_code, ip, host, COUNT(*) AS calls, MAX(created_at) AS last_at')
+            ->groupBy('key_id_sent', 'error_code', 'ip', 'host')
+            ->orderByDesc('last_at')
+            ->limit(50)
+            ->get()
+            ->map(fn (object $row) => [
+                'key_id' => (string) $row->key_id_sent,
+                'error_code' => (string) $row->error_code,
+                'ip' => $row->ip,
+                'host' => $row->host,
+                'calls' => (int) $row->calls,
+                'last_at' => $row->last_at,
+            ])
+            ->all();
+
+        return Inertia::render('admin/ip-management', [
+            'enforced' => (bool) config('paygate.api.enforce_ip_allowlist', true),
+            'partners' => $partners,
+            'environment' => ApiEnvironment::current(),
+            'wrong_server' => $wrongServer,
+        ]);
+    }
+}
