@@ -60,6 +60,7 @@ npm ci --no-audit --no-fund
 npm run build
 
 step "Database backup"
+mkdir -p -m 700 "$PAYGATE/backups"   # backups hold the whole database: site user only
 BACKUP="$PAYGATE/backups/before-deploy-$(date +%F-%H%M).dump"
 pg_dump -h 127.0.0.1 -p 5433 -U "$DB_OWNER" -Fc "$DB_NAME" > "$BACKUP"
 echo "Saved $BACKUP"
